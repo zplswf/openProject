@@ -1,0 +1,392 @@
+package com.xxx.app.hfive.util;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.UnsupportedEncodingException;
+import java.net.URLDecoder;
+import java.net.URLEncoder;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import javax.servlet.http.HttpServletRequest;
+
+import org.apache.commons.lang.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.ui.ModelMap;
+
+import com.alibaba.fastjson.JSONObject;
+import com.xxx.app.exception.WeiXinException;
+import com.xxx.app.hfive.vo.HtmlVO;
+import com.xxx.app.po.AccessToken;
+import com.xxx.app.po.UserInfo;
+import com.xxx.app.po.WeiXinSharePO;
+import com.xxx.base.pub.util.FileClient;
+import com.xxx.comm.redis.RedisIO;
+import com.xxx.comm.spring.interceptor.HttpLocalThread;
+import com.xxx.comm.util.HttpsUtil;
+import com.xxx.comm.util.HttpsUtil.HttpResponseWrapper;
+import com.xxx.comm.vo.Constant;
+import com.mongodb.util.Hash;
+
+public class WeiXinUtil {
+	
+	public static enum WEIXIN_SCOPE_ENUM{
+		USERINFO,BASE;
+	}
+	
+	private final static Logger log = LoggerFactory.getLogger(WeiXinUtil.class);
+
+	public final static String BARGAIN_WEIXIN_TOKEN="FESTIVAL_WEIXIN_TOKEN";
+	
+	/**
+	 * 2、以snsapi_userinfo为scope发起的网页授权，是用来获取用户的基本信息的。但这种授权需要用户手动同意，并且由于用户同意过，所以无须关注，就可在授权后获取该用户的基本信息。
+	 */
+	private final static String WEIXIN_OAUTH=
+			"https://open.weixin.qq.com/connect/oauth2/authorize?appid=@appId@&redirect_uri=@redirectUrl@&response_type=code&scope=snsapi_userinfo&state=STATE#wechat_redirect";
+	
+	/**
+	 * 1、以snsapi_base为scope发起的网页授权，是用来获取进入页面的用户的openid的，并且是静默授权并自动跳转到回调页的。用户感知的就是直接进入了回调页（往往是业务页面）
+	 */
+	private final static String WEIXIN_OAUTH_BASE=
+			"https://open.weixin.qq.com/connect/oauth2/authorize?appid=@appId@&redirect_uri=@redirectUrl@&response_type=code&scope=snsapi_base&state=STATE#wechat_redirect";
+
+	
+	private final static String WEIXIN_ACCESS_TOKEN = 
+			"https://api.weixin.qq.com/sns/oauth2/access_token?appid=@appId@&secret=@secret@&code=@code@&grant_type=authorization_code";
+	
+	private final static String USER_INFO_URI = 
+			"https://api.weixin.qq.com/sns/userinfo?access_token=@accessToken@&openid=@openId@";
+	
+	private final static String JS_TOKEN_URL = "https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=@appId@&secret=@secret@";
+	
+	private final static String JS_TICKET_URL = "https://api.weixin.qq.com/cgi-bin/ticket/getticket?access_token=@ACCESS_TOKEN@&type=jsapi";
+	
+	/**
+	 * 获取code并回调redirectUrl
+	 * @return
+	 */
+	public static String getCodeUrl(String scope){
+		String appId = Constant.getInstance().getProperty("appid");
+		String redirectUrl = Constant.getInstance().getProperty("redirect_url");
+		String url = "";
+		if(StringUtils.equals(scope, WEIXIN_SCOPE_ENUM.BASE.name())){
+			url = WEIXIN_OAUTH_BASE.replaceAll("@appId@", appId).replaceAll("@redirectUrl@", redirectUrl);
+		}else{
+			url = WEIXIN_OAUTH.replaceAll("@appId@", appId).replaceAll("@redirectUrl@", redirectUrl);
+		}
+		return url;
+	}
+
+	/**
+	 * 获取code并回调redirectUrl
+	 * @return
+	 */
+	public static String getCodeUrl(String scope,String tourl){
+		String appId = Constant.getInstance().getProperty("appid");
+		StringBuffer redirectUrl = new StringBuffer(Constant.getInstance().getProperty("redirect_url"));
+		if(StringUtils.isNotEmpty(tourl)) {
+			if (redirectUrl.indexOf("?") > -1) {
+				redirectUrl.append("&tourl=");
+			} else {
+				redirectUrl.append("?tourl=");
+			}
+			redirectUrl.append(encode(tourl));
+		}
+
+		String url = "";
+		if(StringUtils.equals(scope, WEIXIN_SCOPE_ENUM.BASE.name())){
+			url = WEIXIN_OAUTH_BASE.replaceAll("@appId@", appId).replaceAll("@redirectUrl@", encode(redirectUrl.toString()));
+		}else{
+			url = WEIXIN_OAUTH.replaceAll("@appId@", appId).replaceAll("@redirectUrl@", encode(redirectUrl.toString()));
+		}
+		return url;
+	}
+
+	/**
+	 * 获取token
+	 * @param code
+	 * @return
+	 */
+	public static AccessToken getAccessToken(String code){
+		if(StringUtils.isEmpty(code)){
+			return null;
+		}
+		String appId = Constant.getInstance().getProperty("appid");
+		String secret = Constant.getInstance().getProperty("secret");
+		String url = WEIXIN_ACCESS_TOKEN.replaceAll("@appId@", appId).replaceAll("@secret@", secret).replaceAll("@code@", code);
+		String result = HttpsUtil.requestGet(url);
+		JSONObject obj = JSONObject.parseObject(result);
+		if(!obj.containsKey("expires_in")){
+			throw new WeiXinException(obj.getString("errmsg"));
+		}
+		AccessToken accessToken = new AccessToken();
+		accessToken.setAccessToken(obj.getString("access_token"));
+		accessToken.setExpiresIn(obj.getInteger("expires_in"));
+		accessToken.setOpenId(obj.getString("openid"));
+		return accessToken;
+	}
+	
+	/**
+	 * 获取用户的基本信息
+	 * @param accessToken
+	 * @param openId
+	 * @return
+	 * @throws Exception
+	 */
+	public static UserInfo getUserInfo(String accessToken, String openId) throws Exception {
+		Map<String, Object> params = new HashMap<>();
+		params.put("access_token", accessToken);
+		params.put("openid", openId);
+		String infoUri = USER_INFO_URI.replaceAll("@accessToken@", accessToken).replaceAll("@openId@",openId);
+		String  jsonStr = HttpsUtil.requestGet(infoUri, params);
+		if(StringUtils.isNotEmpty(jsonStr)){
+			JSONObject obj = JSONObject.parseObject(jsonStr);
+			if(obj.get("errcode") != null){
+				throw new WeiXinException(obj.getString("errmsg"));
+			}
+			UserInfo user = JSONObject.toJavaObject(obj, UserInfo.class);
+			log.info("weixinuser="+user.toString());
+			user.setNickname(filterEmoji(user.getNickname()));
+			return user;
+		}
+		return null;
+	}
+	
+	/**
+	 * 校验是否是微信浏览器
+	 * @return
+	 */
+	public static boolean validateWeiXin(){
+		boolean flag = false;
+		String userAgent = HttpLocalThread.getRequest().getHeader("USER-AGENT");
+		if(userAgent.toLowerCase().indexOf("micromessenger")>0){
+			flag = true;
+		}
+		return flag;
+	}
+	
+	public static boolean isMobile(String str) { 
+		Pattern p = null;
+		Matcher m = null;
+		boolean b = false; 
+		p = Pattern.compile("^[1][3,4,5,8,7][0-9]{9}$");
+		m = p.matcher(str);
+		b = m.matches(); 
+		return b;
+	}
+	
+	public static String downHeadImgUrl(String url) {
+		HttpResponseWrapper httpResponseWrapper = null;
+		try {
+			String xForWardedFor = "Mozilla/5.0 (iPhone; CPU iPhone OS 7_0 like Mac OS X; en-us) AppleWebKit/537.51.1 (KHTML, like Gecko) Version/7.0 Mobile/11A465 Safari/9537.53";
+			httpResponseWrapper = HttpsUtil.requestGetResponse(url,xForWardedFor);
+			if (httpResponseWrapper.getStatusCode() == 200) {
+				InputStream inStream = httpResponseWrapper.getEntity().getContent();
+				return writeImageToDisk(readInputStream(inStream));
+			}
+		} catch (Exception e) {
+			log.error("down weixin image is error", e);
+			e.printStackTrace();
+		}finally{
+			if(httpResponseWrapper!=null){
+				httpResponseWrapper.close();
+			}
+		}
+		return null;
+	}
+
+	private static byte[] readInputStream(InputStream inStream) throws Exception {
+		ByteArrayOutputStream outStream = new ByteArrayOutputStream();
+		byte[] buffer = new byte[1024];
+		int len = 0;
+		while ((len = inStream.read(buffer)) != -1) {
+			outStream.write(buffer, 0, len);
+		}
+		inStream.close();
+		return outStream.toByteArray();
+	}
+
+	private static String writeImageToDisk(byte[] img) throws Exception {
+		FileOutputStream fops = null;
+		File file = null;
+		String filePath = "";
+		try{
+				
+			String path = WeiXinUtil.class.getClassLoader().getResource("/").getPath();
+			String name = new Date().getTime()+".jpg";
+        	path=path.substring(0, path.indexOf("WEB-INF")+"WEB-INF".length())+"/resources/"+name;
+			file = new File(path);
+			fops = new FileOutputStream(file);
+			fops.write(img);
+			fops.flush();
+			
+			filePath=FileClient.uploadImageToRemote(file, file.getName());
+		}catch(Exception e){
+			log.error("down weixin", e);
+			throw new Exception(e);
+		}finally{
+			if(fops!=null){
+				fops.close();
+			}
+			if(file.isFile() && file.exists()){
+				file.delete();  
+			}
+		}
+		return filePath;
+	}
+	
+	 /**
+	  * 获取接口访问凭证
+	  * @return
+	  */
+    public static String getAccess_token() {
+		String appId = Constant.getInstance().getProperty("appid");
+		String secret = Constant.getInstance().getProperty("secret");
+		String tokenUrl  = JS_TOKEN_URL.replaceAll("@appId@", appId).replaceAll("@secret@", secret);
+        // 发起GET请求获取凭证
+        String result = HttpsUtil.requestGet(tokenUrl);
+        log.info("获取接口访问凭证 info"+result);
+        String access_token = null;
+        JSONObject jsonObject = JSONObject.parseObject(result);
+        if (null != jsonObject) {
+           access_token = jsonObject.getString("access_token");
+        }
+        return access_token;
+    }
+    
+    /**
+     * 调用微信JS接口的临时票据
+     * @param access_token
+     * @return
+     */
+    public static String getJsApiTicket(String access_token) {
+        String tokenUrl = JS_TICKET_URL.replaceAll("@ACCESS_TOKEN@", access_token);
+        String result = HttpsUtil.requestGet(tokenUrl);
+        log.info("调用微信JS接口的临时票据 info"+result);
+        JSONObject jsonObject = JSONObject.parseObject(result);
+        String ticket = null;
+        if (null != jsonObject) {
+           ticket = jsonObject.getString("ticket");
+        }
+        return ticket;
+    }
+
+    /**
+     * js sdk调用分享需要传入前台的参数
+     * @param req
+     * @return
+     */
+    public static WeiXinSharePO getParam(HttpServletRequest req){
+    	String ticket = "";
+    	String key = RedisIO.getInstance().get(BARGAIN_WEIXIN_TOKEN);
+		if (StringUtils.isNotEmpty(key)) {
+			ticket = key;
+		} else {
+			String token = getAccess_token();
+			ticket = getJsApiTicket(token);
+			RedisIO.getInstance().set(BARGAIN_WEIXIN_TOKEN,ticket, 3600);
+		}
+        String url = getUrl(req);
+        Map<String, String> params = WeiXinSign.sign(ticket, url);
+        log.info("weixin sign"+params.toString());
+        WeiXinSharePO weiXin = new WeiXinSharePO();
+        weiXin.setAppId(Constant.getInstance().getProperty("appid"));
+        weiXin.setNonceStr(params.get("nonceStr"));
+        weiXin.setSignature(params.get("signature"));
+        weiXin.setTimestamp(params.get("timestamp"));
+        return weiXin;
+    }
+    
+    private static String getUrl(HttpServletRequest req){
+        StringBuffer requestUrl = req.getRequestURL();
+        String queryString = req.getQueryString();
+        if(StringUtils.isEmpty(queryString)){
+        	return requestUrl.toString();
+        }
+        String url = requestUrl +"?"+queryString;
+        return url;
+    }
+    
+    public static String encode(String str){
+    	try {
+			return URLEncoder.encode(str, "UTF-8");
+		} catch (UnsupportedEncodingException e) {
+			return "";
+		}
+    }
+    
+    public static String deCode(String str){
+    	try {
+			return URLDecoder.decode(str, "UTF-8");
+		} catch (UnsupportedEncodingException e) {
+			return "";
+		}
+    }
+	
+	public static void main(String[] args) {
+//		String ticket = getJsApiTicket(getAccess_token());
+//		System.out.println(ticket);
+		System.out.println(StringUtils.equals(WEIXIN_SCOPE_ENUM.BASE.name(), WEIXIN_SCOPE_ENUM.BASE.name()));
+	}
+	
+	public static boolean containsEmoji(String source) {
+		if (StringUtils.isBlank(source)) {
+			return false;
+		}
+		int len = source.length();
+		for (int i = 0; i < len; i++) {
+			char codePoint = source.charAt(i);
+
+			if (isEmojiCharacter(codePoint)) {
+				// do nothing，判断到了这里表明，确认有表情字符
+				return true;
+			}
+		}
+		return false;
+	}
+	
+
+	private static boolean isEmojiCharacter(char codePoint) {
+		return (codePoint == 0x0) || (codePoint == 0x9) || (codePoint == 0xA)
+				|| (codePoint == 0xD)
+				|| ((codePoint >= 0x20) && (codePoint <= 0xD7FF))
+				|| ((codePoint >= 0xE000) && (codePoint <= 0xFFFD))
+				|| ((codePoint >= 0x10000) && (codePoint <= 0x10FFFF));
+	}
+
+	
+	public static String filterEmoji(String source) {
+		if (!containsEmoji(source)) {
+			return source;// 如果不包含，直接返回
+		}
+		// 到这里铁定包含
+		StringBuilder buf = null;
+		int len = source.length();
+		for (int i = 0; i < len; i++) {
+			char codePoint = source.charAt(i);
+			if (isEmojiCharacter(codePoint)) {
+				if (buf == null) {
+					buf = new StringBuilder(source.length());
+				}
+				buf.append(codePoint);
+			}
+		}
+		if (buf == null) {
+			return source;// 如果没有找到 emoji表情，则返回源字符串
+		} else {
+			if (buf.length() == len) {// 这里的意义在于尽可能少的toString，因为会重新生成字符串
+				buf = null;
+				return source;
+			} else {
+				return buf.toString();
+			}
+		}
+	}
+
+}
