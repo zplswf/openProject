@@ -1,4 +1,5 @@
 
+
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Date;
@@ -7,6 +8,7 @@ import java.util.List;
 
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.lang.time.DateFormatUtils;
 import org.apache.poi.hssf.usermodel.HSSFCell;
@@ -56,25 +58,18 @@ public final class ExcelUtil<T> {
 				row = sheet.createRow(index);
 				T t = (T) it.next();
 				Field[] fields = t.getClass().getDeclaredFields();
-
-				for (int j = 0; j < containBean.size(); j++) {
+				if(CollectionUtils.isNotEmpty(containBean)){
+					for (int j = 0; j < containBean.size(); j++) {
+						for (int i = 0; i < fields.length; i++) {
+							Field field = fields[i];
+							if (!field.getName().equals(containBean.get(j)))continue;
+							getCellValue(t, field, row, j);
+						}
+					}
+				}else{
 					for (int i = 0; i < fields.length; i++) {
 						Field field = fields[i];
-						if (!field.getName().equals(containBean.get(j)))continue;
-						HSSFCell cell = row.createCell(j);
-						Object value = invoke(t, field);
-						String textValue = null;
-						if (value != null) {
-							if (value instanceof Date) {
-								Date date = (Date) value;
-								textValue = DateFormatUtils.format(date,SuperDate.patternDateTime);
-							} else {
-								textValue = value.toString();
-							}
-						}
-						if (textValue != null) {
-							cell.setCellValue(textValue);
-						}
+						getCellValue(t, field, row, i);
 					}
 				}
 			}
@@ -87,10 +82,26 @@ public final class ExcelUtil<T> {
 			}
 		}
 	}
+	
+	private void getCellValue(T t,Field field,HSSFRow row,int index){
+		HSSFCell cell = row.createCell(index);
+		Object value = invoke(t, field);
+		String textValue = null;
+		if (value != null) {
+			if (value instanceof Date) {
+				Date date = (Date) value;
+				textValue = DateFormatUtils.format(date,SuperDate.patternDateTime);
+			} else {
+				textValue = value.toString();
+			}
+		}
+		if (textValue != null) {
+			cell.setCellValue(textValue);
+		}
+	}
 
-	public void exportExcel(HttpServletResponse response, String title,
-			String[] headers, List<T> list) throws Exception {
-		exportExcel(response, title, headers, null);
+	public void exportExcel(HttpServletResponse response, String title,String[] headers, List<T> list) throws Exception {
+		exportExcel(response, title, headers, list,null);
 	}
 
 	private Object invoke(T t, Field field) {
