@@ -1,0 +1,108 @@
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.Date;
+import java.util.Iterator;
+import java.util.List;
+
+import javax.servlet.http.HttpServletResponse;
+
+import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang.time.DateFormatUtils;
+import org.apache.poi.hssf.usermodel.HSSFCell;
+import org.apache.poi.hssf.usermodel.HSSFRichTextString;
+import org.apache.poi.hssf.usermodel.HSSFRow;
+import org.apache.poi.hssf.usermodel.HSSFSheet;
+import org.apache.poi.hssf.usermodel.HSSFWorkbook;
+
+import com.xxx.tool.SuperDate;
+
+public final class ExcelUtil<T> {
+
+	/**
+	 * 
+	 * @param response
+	 * @param title
+	 *            导出的名字命名
+	 * @param headers
+	 *            导出表格每列显示的title
+	 * @param list
+	 *            查询的数据信息
+	 * @param containBean
+	 *            指定哪些列需要导出
+	 * @throws Exception
+	 */
+	public void exportExcel(HttpServletResponse response, String title,
+			String[] headers, List<T> list, List<String> containBean)
+			throws Exception {
+
+		// 声明一个工作薄
+		HSSFWorkbook workbook = null;
+		try {
+			workbook = new HSSFWorkbook();
+			// 生成一个表格
+			HSSFSheet sheet = workbook.createSheet(title);
+			// 产生表格标题行
+			HSSFRow row = sheet.createRow(0);
+			for (short i = 0; i < headers.length; i++) {
+				HSSFCell cell = row.createCell(i);
+				HSSFRichTextString text = new HSSFRichTextString(headers[i]);
+				cell.setCellValue(text);
+			}
+			Iterator<T> it = list.iterator();
+			int index = 0;
+			while (it.hasNext()) {
+				index++;
+				row = sheet.createRow(index);
+				T t = (T) it.next();
+				Field[] fields = t.getClass().getDeclaredFields();
+
+				for (int j = 0; j < containBean.size(); j++) {
+					for (int i = 0; i < fields.length; i++) {
+						Field field = fields[i];
+						if (!field.getName().equals(containBean.get(j)))continue;
+						HSSFCell cell = row.createCell(j);
+						Object value = invoke(t, field);
+						String textValue = null;
+						if (value != null) {
+							if (value instanceof Date) {
+								Date date = (Date) value;
+								textValue = DateFormatUtils.format(date,SuperDate.patternDateTime);
+							} else {
+								textValue = value.toString();
+							}
+						}
+						if (textValue != null) {
+							cell.setCellValue(textValue);
+						}
+					}
+				}
+			}
+			response.setContentType("application/vnd.ms-excel;charset=UTF-8");
+			response.addHeader("Content-Disposition", "attachment;filename="+ new String((title).getBytes(), "ISO8859-1") + ".xls");
+			workbook.write(response.getOutputStream());
+		} finally {
+			if (workbook != null) {
+				workbook.close();
+			}
+		}
+	}
+
+	public void exportExcel(HttpServletResponse response, String title,
+			String[] headers, List<T> list) throws Exception {
+		exportExcel(response, title, headers, null);
+	}
+
+	private Object invoke(T t, Field field) {
+		try {
+			String fieldName = field.getName();
+			String getMethodName = "get" + StringUtils.capitalize(fieldName);
+			Class<?> tCls = t.getClass();
+			Method getMethod = tCls.getMethod(getMethodName, new Class[] {});
+			Object value = getMethod.invoke(t, new Object[] {});
+			return value;
+		} catch (Exception e) {
+			return null;
+		}
+	}
+}
